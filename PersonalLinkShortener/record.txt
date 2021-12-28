@@ -1,0 +1,4 @@
+{
+    "short_url": { "S": "/Demo2021-12-28" },
+    "long_url": { "S": "https://nos.nl" }
+}

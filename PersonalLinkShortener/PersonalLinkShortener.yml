@@ -1,0 +1,199 @@
+# PersonalLinkShortener CloudFormation template.yml
+# =================================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create Personal Link Shortener Solution
+
+Parameters:
+
+  DynamoDBTableName:
+    Type: String
+    Default: frlink
+  CustomDomainName:
+    Description: I'm using frlink.nl for this purpose, an A record with a different name (like short.yourdomain.nl) should work as well  
+    Type: String
+    Default: frlink.nl
+  StageName:
+    Type: String
+    Default: prod
+  CertificateArn:
+    Description: You can find this in Certificate Manager, it must be a certificate in us-east-1
+    Type: String
+
+Resources:
+
+  # DynamoDB 
+  # ========
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: short_url
+          AttributeType: "S"
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: short_url
+          KeyType: HASH
+      TableName: !Ref DynamoDBTableName
+
+  # Lambda function
+  # ===============  
+  RedirectExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  RedirectExecutionRolePolicies:
+    DependsOn: RedirectExecutionRole
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "RedirectExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: "*"
+          -
+            Effect: "Allow"
+            Action: 
+              - "dynamodb:GetItem"
+            Resource: !Sub "arn:aws:dynamodb:*:*:table/${DynamoDBTableName}" 
+      Roles:
+        -
+          Ref: "RedirectExecutionRole"
+  RedirectFunction:
+    DependsOn: 
+    - RedirectExecutionRole
+    - RedirectExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt RedirectExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          #!/usr/bin/env python
+          # -*- coding: utf-8 -*-
+
+          import json
+          import boto3
+
+          def get_long_url(short_url):
+              dynamodb = boto3.client('dynamodb')
+
+              response = dynamodb.get_item(
+                  TableName='frlink',
+                  Key={
+                      'short_url': { 'S': short_url }
+                  },
+                  AttributesToGet=[
+                      'long_url'
+                  ],
+                  ConsistentRead=False,
+                  ReturnConsumedCapacity='NONE'
+              )
+              print("Response from get_item:")
+              print(response)
+
+              return response["Item"]["long_url"]["S"]
+
+
+          def lambda_handler(event, context):
+
+              statusCode = 403
+              headers    = {}
+              body       = {}
+
+              try:
+                  print(event)
+
+                  if (event["httpMethod"] == "GET"):
+                      location = get_long_url(event["path"])
+                      print("New location: "+location)
+
+                      statusCode = 302
+                      headers = { "location": location }
+                      body = {}
+                      
+              except Exception as e:
+                  print("Error:")
+                  print(e)
+              
+              return {
+                  'statusCode': statusCode,
+                  'headers': headers,
+                  'body': json.dumps(body)
+              }
+      Runtime: python3.9
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt RedirectFunction.Arn
+      Principal: "apigateway.amazonaws.com"
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PersonalLinkShortenerAPI}/*/*/*"
+
+  # API Gateway
+  # ===========
+  PersonalLinkShortenerAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: API Gateway for the Personal Link Shortener
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Name: PersonalLinkShortenerAPI
+  LinkShortenerResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt PersonalLinkShortenerAPI.RootResourceId
+      PathPart: "{proxy+}"
+      RestApiId: !Ref PersonalLinkShortenerAPI
+  LinkShortenerMethod:
+    DependsOn: LinkShortenerResource
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: False
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join ["", ["arn:aws:apigateway:", !Ref "AWS::Region", ":lambda:path/2015-03-31/functions/",!Sub "${RedirectFunction.Arn}", "/invocations"]]
+      ResourceId: !Ref LinkShortenerResource
+      RestApiId: !Ref PersonalLinkShortenerAPI
+
+  StageDeployment:
+    DependsOn: LinkShortenerMethod
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      Description: !Ref StageName
+      RestApiId: !Ref PersonalLinkShortenerAPI
+      StageName: !Ref StageName
+
+  DomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      CertificateArn: !Ref CertificateArn
+      DomainName: !Ref CustomDomainName
+  CustomDomainNameBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref DomainName
+      RestApiId: !Ref PersonalLinkShortenerAPI
+      Stage: prod
+  
