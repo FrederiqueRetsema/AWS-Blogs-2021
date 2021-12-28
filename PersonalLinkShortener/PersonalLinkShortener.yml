@@ -84,7 +84,7 @@ Resources:
       Role: !GetAtt RedirectExecutionRole.Arn
       Timeout: 60
       Code:
-        ZipFile: |
+        ZipFile: !Sub |
           #!/usr/bin/env python
           # -*- coding: utf-8 -*-
 
@@ -95,7 +95,7 @@ Resources:
               dynamodb = boto3.client('dynamodb')
 
               response = dynamodb.get_item(
-                  TableName='frlink',
+                  TableName='${DynamoDBTableName}',
                   Key={
                       'short_url': { 'S': short_url }
                   },
